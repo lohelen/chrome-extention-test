@@ -14,7 +14,7 @@ Backend API for CV Optimizer Chrome Extension.
 ## Environment Variables
 
 ```bash
-GEMINI_API_KEY=your_gemini_api_key
+OPENROUTER_API_KEY=your_openrouter_api_key
 KV_REST_API_URL=your_redis_url
 KV_REST_API_TOKEN=your_redis_token
 ENABLE_API=true
