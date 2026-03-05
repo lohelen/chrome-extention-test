@@ -33,6 +33,17 @@ function getClientIp(request: NextRequest): string {
   return 'unknown';
 }
 
+// CORS Headers Helper
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+};
+
+export async function OPTIONS() {
+  return NextResponse.json({}, { headers: corsHeaders });
+}
+
 export async function POST(request: NextRequest) {
   try {
     // 1. Kill Switch Check
@@ -40,7 +51,7 @@ export async function POST(request: NextRequest) {
     if (enableApi === 'false' || enableApi === '0') {
       return NextResponse.json(
         { error: 'Service is currently under maintenance. Please try again later.' },
-        { status: 503 }
+        { status: 503, headers: corsHeaders }
       );
     }
 
@@ -56,7 +67,7 @@ export async function POST(request: NextRequest) {
           remaining: 0,
           reset: new Date(reset).toISOString()
         },
-        { status: 429 }
+        { status: 429, headers: corsHeaders }
       );
     }
 
@@ -67,7 +78,7 @@ export async function POST(request: NextRequest) {
     if (!action || !jdText) {
       return NextResponse.json(
         { error: 'Missing required fields: action, jdText' },
-        { status: 400 }
+        { status: 400, headers: corsHeaders }
       );
     }
 
@@ -77,7 +88,7 @@ export async function POST(request: NextRequest) {
       console.error('OPENROUTER_API_KEY not configured');
       return NextResponse.json(
         { error: 'Server configuration error' },
-        { status: 500 }
+        { status: 500, headers: corsHeaders }
       );
     }
 
@@ -88,7 +99,7 @@ export async function POST(request: NextRequest) {
         if (!cvText) {
           return NextResponse.json(
             { error: 'Missing cvText for optimization' },
-            { status: 400 }
+            { status: 400, headers: corsHeaders }
           );
         }
         result = await optimizeCV(apiKey, jdText, cvText);
@@ -102,7 +113,7 @@ export async function POST(request: NextRequest) {
         if (!cvText) {
           return NextResponse.json(
             { error: 'Missing cvText for ATS analysis' },
-            { status: 400 }
+            { status: 400, headers: corsHeaders }
           );
         }
         result = await analyzeAtsSwot(apiKey, jdText, cvText);
@@ -111,7 +122,7 @@ export async function POST(request: NextRequest) {
       default:
         return NextResponse.json(
           { error: 'Invalid action. Must be: optimize, interview, or ats-swot' },
-          { status: 400 }
+          { status: 400, headers: corsHeaders }
         );
     }
 
@@ -124,13 +135,13 @@ export async function POST(request: NextRequest) {
         remaining,
         reset: new Date(reset).toISOString()
       }
-    });
+    }, { headers: corsHeaders });
 
   } catch (error: any) {
     console.error('Gateway error:', error);
     return NextResponse.json(
       { error: error.message || 'Internal server error' },
-      { status: 500 }
+      { status: 500, headers: corsHeaders }
     );
   }
 }
