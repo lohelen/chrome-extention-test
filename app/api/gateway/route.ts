@@ -1,14 +1,4 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { Ratelimit } from '@upstash/ratelimit';
-import { Redis } from '@upstash/redis';
-
-// Initialize rate limiter (5 requests per 24 hours per IP)
-const ratelimit = new Ratelimit({
-  redis: Redis.fromEnv(),
-  limiter: Ratelimit.slidingWindow(5, '24 h'),
-  analytics: true,
-  prefix: 'cv-optimizer-extension',
-});
 
 // Helper function to clean JSON responses
 function cleanJsonResponse(text: string): string {
@@ -55,23 +45,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // 2. Rate Limit Check
-    const clientIp = getClientIp(request);
-    const { success, limit, reset, remaining } = await ratelimit.limit(clientIp);
-
-    if (!success) {
-      return NextResponse.json(
-        {
-          error: 'Daily quota exceeded. Please try again tomorrow.',
-          limit,
-          remaining: 0,
-          reset: new Date(reset).toISOString()
-        },
-        { status: 429, headers: corsHeaders }
-      );
-    }
-
-    // 3. Parse request body
+    // 2. Parse request body
     const body = await request.json();
     const { action, jdText, cvText } = body;
 
@@ -126,15 +100,10 @@ export async function POST(request: NextRequest) {
         );
     }
 
-    // 6. Return result with quota info
+    // 6. Return result
     return NextResponse.json({
       success: true,
-      data: result,
-      quota: {
-        limit,
-        remaining,
-        reset: new Date(reset).toISOString()
-      }
+      data: result
     }, { headers: corsHeaders });
 
   } catch (error: any) {
