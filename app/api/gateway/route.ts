@@ -11,13 +11,54 @@ const ratelimit = new Ratelimit({
   prefix: 'cv-optimizer-extension',
 });
 
-// Helper function to clean JSON responses
+// Helper function to clean JSON responses from AI
 function cleanJsonResponse(text: string): string {
   let cleaned = text.trim();
+  // Remove markdown code fences
   if (cleaned.startsWith('```')) {
-    cleaned = cleaned.replace(/^```json\n?|```$/g, '').trim();
+    cleaned = cleaned.replace(/^```(?:json)?\n?/i, '').replace(/```\s*$/, '').trim();
+  }
+  // Remove any leading/trailing non-JSON characters
+  const firstBrace = cleaned.indexOf('{');
+  const lastBrace = cleaned.lastIndexOf('}');
+  const firstBracket = cleaned.indexOf('[');
+  const lastBracket = cleaned.lastIndexOf(']');
+
+  if (firstBrace !== -1 && lastBrace !== -1) {
+    // Check if it's an object or array
+    if (firstBracket !== -1 && firstBracket < firstBrace) {
+      cleaned = cleaned.substring(firstBracket, lastBracket + 1);
+    } else {
+      cleaned = cleaned.substring(firstBrace, lastBrace + 1);
+    }
   }
   return cleaned;
+}
+
+// Safely parse JSON with error recovery
+function safeJsonParse(text: string): any {
+  const cleaned = cleanJsonResponse(text);
+  try {
+    return JSON.parse(cleaned);
+  } catch (e) {
+    // Try fixing common issues: trailing commas, unescaped newlines in strings
+    let fixed = cleaned
+      .replace(/,\s*}/g, '}')      // trailing comma before }
+      .replace(/,\s*]/g, ']')       // trailing comma before ]
+      .replace(/[\x00-\x1F\x7F]/g, (ch) => {
+        // Escape control characters inside strings
+        if (ch === '\n') return '\\n';
+        if (ch === '\r') return '\\r';
+        if (ch === '\t') return '\\t';
+        return '';
+      });
+    try {
+      return JSON.parse(fixed);
+    } catch (e2) {
+      console.error('JSON parse failed even after cleanup. Raw text:', text.substring(0, 500));
+      throw new Error('AI returned invalid JSON. Please try again.');
+    }
+  }
 }
 
 // Helper function to get client IP
@@ -228,8 +269,7 @@ IMPORTANT:
 
   const data = await response.json();
   const text = data.choices[0].message.content;
-  const cleanedText = cleanJsonResponse(text);
-  const parsedResult = JSON.parse(cleanedText);
+  const parsedResult = safeJsonParse(text);
 
   return {
     keywords: parsedResult.keywords || [],
@@ -284,8 +324,7 @@ IMPORTANT:
 
   const data = await response.json();
   const text = data.choices[0].message.content;
-  const cleanedText = cleanJsonResponse(text);
-  const parsedResult = JSON.parse(cleanedText);
+  const parsedResult = safeJsonParse(text);
 
   if (Array.isArray(parsedResult)) return parsedResult;
   if (parsedResult.questions && Array.isArray(parsedResult.questions)) return parsedResult.questions;
@@ -348,6 +387,5 @@ Return pure JSON:
 
   const data = await response.json();
   const text = data.choices[0].message.content;
-  const cleanedText = cleanJsonResponse(text);
-  return JSON.parse(cleanedText);
+  return safeJsonParse(text);
 }
