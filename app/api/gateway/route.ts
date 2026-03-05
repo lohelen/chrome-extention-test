@@ -186,7 +186,7 @@ Please perform the following tasks:
 
 Return your response in the following JSON format:
 {
-  "keywords": ["Hard Skill 1", "Strategic Soft Skill 1", ...],
+  "keywords": ["Google Ads", "SEO", "Python", ...],
   "jdSummary": "A concise summary of the JD...",
   "sections": [
     {
@@ -199,6 +199,7 @@ Return your response in the following JSON format:
 }
 
 IMPORTANT: 
+- In the "keywords" array, return ONLY the keyword itself (e.g., "Google Ads", "SEO", "Python"). Do NOT include any category prefix like "Hard Skills/Tech Stack:" or "Core Responsibilities:".
 - Automatically detect the language of the CV and respond in the same language.
 - Ensure the optimized CV is natural and readable.
 - Do not fabricate experience or skills.
