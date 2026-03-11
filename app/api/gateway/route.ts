@@ -2,11 +2,11 @@ import { NextRequest, NextResponse } from 'next/server';
 import { Ratelimit } from '@upstash/ratelimit';
 import { Redis } from '@upstash/redis';
 
-// Initialize rate limiter (15 requests per 24 hours per IP)
-// Each "Optimize" click sends 3 parallel API calls, so 15 = 5 actual uses per day
+// Initialize rate limiter (9 requests per 24 hours per IP)
+// Each "Optimize" click sends 3 parallel API calls, so 9 = 3 actual uses per day
 const ratelimit = new Ratelimit({
   redis: Redis.fromEnv(),
-  limiter: Ratelimit.slidingWindow(15, '24 h'),
+  limiter: Ratelimit.slidingWindow(9, '24 h'),
   analytics: true,
   prefix: 'cv-optimizer-extension',
 });
