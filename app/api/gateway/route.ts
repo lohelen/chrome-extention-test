@@ -113,21 +113,21 @@ export async function POST(req: NextRequest) {
     }
 
     const body = await req.json();
-    const { action, jdText, cvText, licenseKey } = body;
+    const { action, jdText, cvText, userEmail } = body;
     let userTier: 'free' | 'pro' | 'premium' = 'free';
     let rateLimitIdentifier = getClientIp(req);
 
-    // 3. Verify License Key if provided
-    if (licenseKey) {
-      const { data: license, error } = await supabase
-        .from('licenses')
+    // 3. Verify user tier if email is provided
+    if (userEmail) {
+      const { data: user, error } = await supabase
+        .from('users')
         .select('tier, plan_status')
-        .eq('key_text', licenseKey)
+        .eq('email', userEmail)
         .single();
 
-      if (license && license.plan_status === 'active') {
-        userTier = license.tier as 'free' | 'pro' | 'premium';
-        rateLimitIdentifier = licenseKey; // Use key instead of IP for paid users
+      if (user && user.plan_status === 'active') {
+        userTier = user.tier as 'free' | 'pro' | 'premium';
+        rateLimitIdentifier = userEmail; // Use email instead of IP for signed-in users
       }
     }
 
