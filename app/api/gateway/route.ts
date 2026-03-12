@@ -2,14 +2,29 @@ import { NextRequest, NextResponse } from 'next/server';
 import { Ratelimit } from '@upstash/ratelimit';
 import { Redis } from '@upstash/redis';
 
-// Initialize rate limiter (9 requests per 24 hours per IP)
-// Each "Optimize" click sends 3 parallel API calls, so 9 = 3 actual uses per day
-const ratelimit = new Ratelimit({
-  redis: Redis.fromEnv(),
-  limiter: Ratelimit.slidingWindow(9, '24 h'),
-  analytics: true,
-  prefix: 'cv-optimizer-extension',
-});
+import { supabase } from '@/app/lib/supabase';
+
+// 1. Initialize Redis for Rate Limiting
+const redis = Redis.fromEnv();
+
+// 2. Define our Rate Limiters based on Tiers
+const limiters = {
+  free: new Ratelimit({
+    redis,
+    limiter: Ratelimit.slidingWindow(9, '24 h'), // 3 uses * 3 APIs
+    prefix: '@upstash/ratelimit/free'
+  }),
+  pro: new Ratelimit({
+    redis,
+    limiter: Ratelimit.slidingWindow(45, '24 h'), // 15 uses * 3 APIs
+    prefix: '@upstash/ratelimit/pro'
+  }),
+  premium: new Ratelimit({
+    redis,
+    limiter: Ratelimit.slidingWindow(150, '24 h'), // 50 uses * 3 APIs
+    prefix: '@upstash/ratelimit/premium'
+  })
+};
 
 // Helper function to clean JSON responses from AI
 function cleanJsonResponse(text: string): string {
@@ -86,7 +101,7 @@ export async function OPTIONS() {
   return NextResponse.json({}, { headers: corsHeaders });
 }
 
-export async function POST(request: NextRequest) {
+export async function POST(req: NextRequest) {
   try {
     // 1. Kill Switch Check
     const enableApi = process.env.ENABLE_API;
@@ -97,25 +112,40 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // 2. Rate Limit Check
-    const clientIp = getClientIp(request);
-    const { success, limit, reset, remaining } = await ratelimit.limit(clientIp);
+    const body = await req.json();
+    const { action, jdText, cvText, licenseKey } = body;
+    let userTier: 'free' | 'pro' | 'premium' = 'free';
+    let rateLimitIdentifier = getClientIp(req);
 
-    if (!success) {
-      return NextResponse.json(
-        {
-          error: 'Daily quota exceeded. Please try again tomorrow.',
-          limit,
-          remaining: 0,
-          reset: new Date(reset).toISOString()
-        },
-        { status: 429, headers: corsHeaders }
-      );
+    // 3. Verify License Key if provided
+    if (licenseKey) {
+      const { data: license, error } = await supabase
+        .from('licenses')
+        .select('tier, plan_status')
+        .eq('key_text', licenseKey)
+        .single();
+
+      if (license && license.plan_status === 'active') {
+        userTier = license.tier as 'free' | 'pro' | 'premium';
+        rateLimitIdentifier = licenseKey; // Use key instead of IP for paid users
+      }
     }
 
-    // 3. Parse request body
-    const body = await request.json();
-    const { action, jdText, cvText } = body;
+    // 4. Check Rate Limits
+    const limiter = limiters[userTier];
+    const { success, limit, remaining, reset } = await limiter.limit(rateLimitIdentifier);
+
+    if (!success) {
+      return NextResponse.json({
+        error: `Daily quota exceeded for ${userTier} tier. Please upgrade or try again tomorrow.`,
+        quota: { limit, remaining, reset: new Date(reset).toISOString() }
+      }, { status: 429, headers: corsHeaders });
+    }
+
+    // 5. Pre-action check for Premium features
+    if (action === 'canva_integration' && userTier !== 'premium') {
+      return NextResponse.json({ error: 'This feature requires a Premium subscription.' }, { status: 403, headers: corsHeaders });
+    }
 
     if (!action || !jdText) {
       return NextResponse.json(
