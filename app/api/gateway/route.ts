@@ -245,6 +245,22 @@ async function optimizeCV(apiKey: string, jdText: string, cvText: string, langua
   const prompt = `
 ${lang}
 
+## ⚠️ CRITICAL FORMATTING REQUIREMENT — READ FIRST
+For ALL Professional Experience / Work Experience sections:
+- The job title / company / location / dates line: plain text, NO bullet
+- EVERY responsibility or achievement below it: MUST start with "- " (hyphen space)
+- Do NOT write paragraphs. Each separate point = a separate "- " bullet.
+
+CORRECT example:
+  European Digital Marketing Executive | Company | London, UK
+  - Developed **content strategy** across 12 brands
+  - Led **conversion optimisation** for 2,140+ product listings
+  - Collaborated with 15 **cross-functional** teams
+
+WRONG example (DO NOT DO THIS):
+  European Digital Marketing Executive | Company | London, UK
+  Developed content strategy across 12 brands. Led conversion optimisation for 2,140+ product listings. Collaborated with 15 cross-functional teams.
+
 ## Your Role
 You are a world-class career strategist who has placed 500+ candidates into top companies. You combine deep HR expertise with ATS (Applicant Tracking System) engineering knowledge.
 
