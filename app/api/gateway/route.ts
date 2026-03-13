@@ -8,23 +8,33 @@ import { supabase } from '@/app/lib/supabase';
 const redis = Redis.fromEnv();
 
 // 2. Define our Rate Limiters based on Tiers
+// Each "use" = 1 button press that triggers ALL actions simultaneously.
+// So these numbers represent actual button presses per day.
 const limiters = {
   free: new Ratelimit({
     redis,
-    limiter: Ratelimit.slidingWindow(9, '24 h'), // 3 uses * 3 APIs
+    limiter: Ratelimit.slidingWindow(3, '24 h'), // 3 uses per day
     prefix: '@upstash/ratelimit/free'
   }),
   pro: new Ratelimit({
     redis,
-    limiter: Ratelimit.slidingWindow(45, '24 h'), // 15 uses * 3 APIs
+    limiter: Ratelimit.slidingWindow(10, '24 h'), // 10 uses per day
     prefix: '@upstash/ratelimit/pro'
   }),
   premium: new Ratelimit({
     redis,
-    limiter: Ratelimit.slidingWindow(150, '24 h'), // 50 uses * 3 APIs
+    limiter: Ratelimit.slidingWindow(9999, '24 h'), // Essentially unlimited
     prefix: '@upstash/ratelimit/premium'
   })
 };
+
+// Model selection based on tier
+function getModel(userTier: string): string {
+  if (userTier === 'premium') {
+    return 'google/gemini-2.5-pro'; // Better reasoning + writing for Premium
+  }
+  return 'google/gemini-2.5-flash'; // Fast + cost-efficient for Free & Pro
+}
 
 // Helper function to clean JSON responses from AI
 function cleanJsonResponse(text: string): string {
@@ -40,7 +50,6 @@ function cleanJsonResponse(text: string): string {
   const lastBracket = cleaned.lastIndexOf(']');
 
   if (firstBrace !== -1 && lastBrace !== -1) {
-    // Check if it's an object or array
     if (firstBracket !== -1 && firstBracket < firstBrace) {
       cleaned = cleaned.substring(firstBracket, lastBracket + 1);
     } else {
@@ -56,12 +65,10 @@ function safeJsonParse(text: string): any {
   try {
     return JSON.parse(cleaned);
   } catch (e) {
-    // Try fixing common issues: trailing commas, unescaped newlines in strings
     let fixed = cleaned
-      .replace(/,\s*}/g, '}')      // trailing comma before }
-      .replace(/,\s*]/g, ']')       // trailing comma before ]
+      .replace(/,\s*}/g, '}')
+      .replace(/,\s*]/g, ']')
       .replace(/[\x00-\x1F\x7F]/g, (ch) => {
-        // Escape control characters inside strings
         if (ch === '\n') return '\\n';
         if (ch === '\r') return '\\r';
         if (ch === '\t') return '\\t';
@@ -80,14 +87,21 @@ function safeJsonParse(text: string): any {
 function getClientIp(request: NextRequest): string {
   const forwarded = request.headers.get('x-forwarded-for');
   const realIp = request.headers.get('x-real-ip');
-
-  if (forwarded) {
-    return forwarded.split(',')[0].trim();
-  }
-  if (realIp) {
-    return realIp;
-  }
+  if (forwarded) return forwarded.split(',')[0].trim();
+  if (realIp) return realIp;
   return 'unknown';
+}
+
+// Language instruction builder
+function langInstruction(language: string): string {
+  switch (language) {
+    case 'zh-TW':
+      return 'You MUST respond and generate ALL content entirely in Traditional Chinese (繁體中文). Every single word of your output must be in Traditional Chinese.';
+    case 'zh-CN':
+      return 'You MUST respond and generate ALL content entirely in Simplified Chinese (简体中文). Every single word of your output must be in Simplified Chinese.';
+    default:
+      return 'You MUST respond and generate ALL content entirely in English.';
+  }
 }
 
 // CORS Headers Helper
@@ -113,11 +127,13 @@ export async function POST(req: NextRequest) {
     }
 
     const body = await req.json();
-    const { action, jdText, cvText, userEmail } = body;
+    const { action, jdText, cvText, userEmail, language } = body;
+    const outputLanguage = language || 'en';
+
     let userTier: 'free' | 'pro' | 'premium' = 'free';
     let rateLimitIdentifier = getClientIp(req);
 
-    // 3. Verify user tier if email is provided
+    // 2. Verify user tier if email is provided
     if (userEmail) {
       const { data: user, error } = await supabase
         .from('users')
@@ -127,11 +143,14 @@ export async function POST(req: NextRequest) {
 
       if (user && user.plan_status === 'active') {
         userTier = user.tier as 'free' | 'pro' | 'premium';
-        rateLimitIdentifier = userEmail; // Use email instead of IP for signed-in users
+        rateLimitIdentifier = userEmail;
       }
     }
 
-    // 4. Check Rate Limits
+    // 3. Check Rate Limits (only deduct once per "run")
+    //    The frontend sends action="run-all" which triggers all generations.
+    //    Individual actions like "optimize", "interview", "ats-swot", "cover-letter"
+    //    are also accepted but each one deducts 1 from the quota.
     const limiter = limiters[userTier];
     const { success, limit, remaining, reset } = await limiter.limit(rateLimitIdentifier);
 
@@ -142,7 +161,7 @@ export async function POST(req: NextRequest) {
       }, { status: 429, headers: corsHeaders });
     }
 
-    // 5. Pre-action check for Premium features
+    // 4. Pre-action check for Premium features
     if (action === 'canva_integration' && userTier !== 'premium') {
       return NextResponse.json({ error: 'This feature requires a Premium subscription.' }, { status: 403, headers: corsHeaders });
     }
@@ -154,7 +173,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 4. Get API Key from environment
+    // 5. Get API Key from environment
     const apiKey = process.env.OPENROUTER_API_KEY;
     if (!apiKey) {
       console.error('OPENROUTER_API_KEY not configured');
@@ -164,36 +183,38 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    const model = getModel(userTier);
     let result;
 
     switch (action) {
       case 'optimize':
         if (!cvText) {
-          return NextResponse.json(
-            { error: 'Missing cvText for optimization' },
-            { status: 400, headers: corsHeaders }
-          );
+          return NextResponse.json({ error: 'Missing cvText for optimization' }, { status: 400, headers: corsHeaders });
         }
-        result = await optimizeCV(apiKey, jdText, cvText);
+        result = await optimizeCV(apiKey, jdText, cvText, outputLanguage, model);
         break;
 
       case 'interview':
-        result = await generateInterviewQuestions(apiKey, jdText);
+        result = await generateInterviewQuestions(apiKey, jdText, outputLanguage, model);
         break;
 
       case 'ats-swot':
         if (!cvText) {
-          return NextResponse.json(
-            { error: 'Missing cvText for ATS analysis' },
-            { status: 400, headers: corsHeaders }
-          );
+          return NextResponse.json({ error: 'Missing cvText for ATS analysis' }, { status: 400, headers: corsHeaders });
         }
-        result = await analyzeAtsSwot(apiKey, jdText, cvText);
+        result = await analyzeAtsSwot(apiKey, jdText, cvText, outputLanguage, model);
+        break;
+
+      case 'cover-letter':
+        if (!cvText) {
+          return NextResponse.json({ error: 'Missing cvText for cover letter' }, { status: 400, headers: corsHeaders });
+        }
+        result = await generateCoverLetter(apiKey, jdText, cvText, outputLanguage, model);
         break;
 
       default:
         return NextResponse.json(
-          { error: 'Invalid action. Must be: optimize, interview, or ats-swot' },
+          { error: 'Invalid action. Must be: optimize, interview, ats-swot, or cover-letter' },
           { status: 400, headers: corsHeaders }
         );
     }
@@ -201,7 +222,8 @@ export async function POST(req: NextRequest) {
     // 6. Return result
     return NextResponse.json({
       success: true,
-      data: result
+      data: result,
+      quota: { limit, remaining: remaining - 1, reset: new Date(reset).toISOString() }
     }, { headers: corsHeaders });
 
   } catch (error: any) {
@@ -213,69 +235,88 @@ export async function POST(req: NextRequest) {
   }
 }
 
-// AI Functions (ported from extension)
-async function optimizeCV(apiKey: string, jdText: string, cvText: string) {
+// ============================================================
+// AI Function: Optimize CV
+// Core Philosophy: Weave naturally, never invent, explain gaps
+// ============================================================
+async function optimizeCV(apiKey: string, jdText: string, cvText: string, language: string, model: string) {
+  const lang = langInstruction(language);
+
   const prompt = `
-角色定位與目標：
+${lang}
 
-* 你是一位擁有多年實務經驗的人力資源資深獵頭，同時具備自然語言處理（NLP）的專業技術，能夠深入剖析企業徵才需求。
-* 你的核心任務是從使用者提供的複雜職位描述（Job Description, JD）中，精準提取出最具商業價值的核心維度資訊。
-* 透過專業的 NLP 技術，將非結構化的文本轉化為結構化的關鍵標籤,協助使用者快速掌握職位重點。
+## Your Role
+You are a world-class career strategist who has placed 500+ candidates into top companies. You combine deep HR expertise with ATS (Applicant Tracking System) engineering knowledge.
 
-行為準則與提取規則：
+## Your Mission
+Rewrite the user's CV to maximize ATS keyword match against the provided Job Description. You must follow STRICT rules below.
 
-1) 資訊提取維度：
-請依據以下類別從 Job Description (JD) 中進行關鍵字提取：
-* 硬技能與技術棧（Hard Skills/Tech Stack）：如特定程式語言、軟體工具、專業證照、NLP 模型架構等。
-* 核心工作職責（Core Responsibilities）：具體的產出目標或關鍵任務。
-* 產業知識與背景（Industry Knowledge）：特定產業的運作流程或領域知識。
-* 關鍵軟技能（Strategic Soft Skills）：排除籠統的描述（如『團隊合作』、『負責任』、『抗壓性強』），僅提取該職位特別強調或具備高門檻的軟實力（如『具備跨國多方利益關係人管理經驗』、『複雜合約談判能力』）。
+## STRICT RULES — Read carefully
 
-提取出的關鍵詞必須具備代表性。
+### Rule 1: NEVER INVENT EXPERIENCE
+You MUST ONLY work with the experiences, skills, and background the user has provided. You are STRICTLY FORBIDDEN from inventing, fabricating, or adding any experience, project, skill, certification, or achievement that does not already exist in the original CV. If the user never mentioned "Python", you CANNOT add "Python" to their CV.
 
-Job Description:
+### Rule 2: WEAVE KEYWORDS NATURALLY INTO EXISTING EXPERIENCE
+Compare the JD keywords against the user's existing CV content. For each experience entry where there is a GENUINE CONNECTION to a JD keyword, rewrite the bullet point to naturally incorporate that keyword. Use professional, fluent language — the keyword must feel like it belongs. Apply the STAR principle (Situation, Task, Action, Result) where possible to strengthen each bullet point.
+
+Example:
+- Original: "Managed social media accounts"
+- JD requires: "content strategy", "cross-functional collaboration"
+- Rewrite: "Developed and executed **content strategy** across social media channels, **collaborating cross-functionally** with design and product teams to align messaging with quarterly business objectives"
+
+### Rule 3: PRESERVE REAL DATA, NEVER FABRICATE METRICS
+If the original CV contains quantifiable data (e.g., "increased sales by 15%"), keep it and highlight it. If the original CV does NOT contain metrics for a bullet point, DO NOT invent numbers. Instead, flag it in the "metricsAdvice" section.
+
+### Rule 4: CHANGELOG — Tell the user EXACTLY what you changed
+For each section you modified, provide a brief summary of what was changed and why (which JD keyword was woven in).
+
+### Rule 5: MISSED KEYWORDS RATIONALE
+After optimization, list all JD keywords you could NOT incorporate because the user's CV has no related experience. For each missed keyword, explain WHY you didn't add it (e.g., "No related experience found in CV") and give a brief suggestion for how the user could address this in an interview.
+
+### Rule 6: METRICS ADVICE
+Identify bullet points where the user describes responsibilities but provides no quantifiable results. For each one, suggest what kind of metric they should add (e.g., "How much traffic did you increase? By what percentage did you improve efficiency?"). DO NOT add the numbers yourself.
+
+## Input
+
+**Job Description:**
 ${jdText}
 
-Current CV:
+**Current CV:**
 ${cvText}
 
-Please perform the following tasks:
-
-1. **Summarize the JD**: Provide a concise summary (1-2 sentences) of what this Job Description is emphasizing and looking for in a candidate.
-
-2. Analyze the CV and split it into logical sections (e.g., Summary, Experience, Skills, Education, etc.).
-
-3. For EACH section:
-   - Extract the "Original Content" exactly as it appears in the Current CV.
-   - Create an "Optimized Content" version by naturally integrating the extracted HIGH-VALUE keywords from the JD.
-   - **CRITICAL FORMATTING INSTRUCTIONS**:
-     - **Fix Spacing Errors**: Correct any broken words from the original text (e.g., fix "M anaged" to "Managed", "P roject" to "Project").
-     - **Use Markdown Lists**: If the original content had bullet points or lists, YOU MUST reproduce them using standard Markdown bullet points ('- Item').
-     - **Preserve Structure**: Ensure distinct paragraphs are separated by blank lines.
-   - **IMPORTANT**: In the "Optimized Content", wrap the following in double asterisks (**keyword**):
-     1. Any NEWLY ADDED or MODIFIED keywords from the JD.
-     2. Any EXISTING high-value industry-specific keywords or quantifiable data points (e.g., '15%', 'Python', 'Revenue'). **Do NOT highlight generic words.**
-
-Return your response in the following JSON format:
+## Required JSON Output Format
 {
-  "keywords": ["Google Ads", "SEO", "Python", ...],
-  "jdSummary": "A concise summary of the JD...",
+  "keywords": ["keyword1", "keyword2", ...],
+  "jdSummary": "A concise 1-2 sentence summary of what the JD is looking for",
   "sections": [
     {
-        "title": "Section Title",
-        "originalContent": "Original text...",
-        "optimizedContent": "Optimized text with **bolded keywords** and - bullet points"
-    },
-    ...
+      "title": "Section Title (e.g., Professional Summary, Work Experience, Skills)",
+      "originalContent": "The exact original text from the CV for this section",
+      "optimizedContent": "The rewritten version with **bolded keywords** woven in naturally. Use Markdown bullet points (- item) for lists.",
+      "changelog": "Brief explanation of what was changed in this section and which JD keywords were integrated"
+    }
+  ],
+  "missedKeywords": [
+    {
+      "keyword": "The JD keyword that was NOT added",
+      "reason": "Why it couldn't be added (no related experience in CV)",
+      "interviewTip": "How to address this gap if asked in an interview"
+    }
+  ],
+  "metricsAdvice": [
+    {
+      "section": "Which section/bullet this applies to",
+      "currentText": "The bullet point that lacks data",
+      "suggestion": "What specific metric or data point the user should add"
+    }
   ]
 }
 
-IMPORTANT: 
-- In the "keywords" array, return ONLY the keyword itself (e.g., "Google Ads", "SEO", "Python"). Do NOT include any category prefix like "Hard Skills/Tech Stack:" or "Core Responsibilities:".
-- Automatically detect the language of the CV and respond in the same language.
-- Ensure the optimized CV is natural and readable.
-- Do not fabricate experience or skills.
-- Only add keywords where they genuinely fit.`;
+IMPORTANT:
+- In the "keywords" array, return ONLY the keyword itself (e.g., "Google Ads", "SEO"). Do NOT include category prefixes.
+- Fix any spacing errors from PDF extraction (e.g., "M anaged" → "Managed").
+- Use Markdown bullet points (- item) for lists in optimizedContent.
+- Ensure the optimized CV reads naturally and professionally.`;
 
   const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
@@ -284,7 +325,7 @@ IMPORTANT:
       "Content-Type": "application/json"
     },
     body: JSON.stringify({
-      "model": "google/gemini-2.5-flash",
+      "model": model,
       "response_format": { "type": "json_object" },
       "messages": [
         { "role": "user", "content": prompt }
@@ -305,32 +346,43 @@ IMPORTANT:
     keywords: parsedResult.keywords || [],
     jdSummary: parsedResult.jdSummary || "Summary not available.",
     sections: parsedResult.sections || [],
+    missedKeywords: parsedResult.missedKeywords || [],
+    metricsAdvice: parsedResult.metricsAdvice || []
   };
 }
 
-async function generateInterviewQuestions(apiKey: string, jdText: string) {
+// ============================================================
+// AI Function: Generate Interview Questions
+// ============================================================
+async function generateInterviewQuestions(apiKey: string, jdText: string, language: string, model: string) {
+  const lang = langInstruction(language);
+
   const prompt = `
-角色定位與目標：
+${lang}
 
-* 你是一位擁有多年實務經驗的人力資源資深獵頭，同時具備自然語言處理（NLP）的專業技術，能夠深入剖析企業徵才需求。
-* 你的核心任務是根據使用者提供的職位描述（Job Description, JD），預測面試中極可能被問到的問題。
+## Your Role
+You are a senior hiring manager with 15+ years of experience conducting interviews at top-tier companies. You know exactly what separates average candidates from exceptional ones.
 
-Job Description:
+## Your Mission
+Based on the Job Description below, generate 10 highly strategic interview questions that are SPECIFIC to this role. These should NOT be generic questions — they must directly reference the skills, tools, responsibilities, and challenges mentioned in the JD.
+
+## Job Description:
 ${jdText}
 
-Task:
-Generate 10 strategic interview questions based SPECIFICALLY on the requirements, skills, and responsibilities mentioned in the JD above.
-The questions should be a mix of:
-1.  **Behavioral Questions** (e.g., "Tell me about a time when you applied [Skill]...")
-2.  **Technical/Skill-based Questions** (e.g., "How would you approach [Task] using [Tool]?")
-3.  **Situational Questions** (e.g., "If [Scenario] happens, what would you do?")
+## Question Categories (mix all three):
+1. **Behavioral Questions** (e.g., "Tell me about a time when you applied [specific skill from JD]...")
+2. **Technical/Skill-based Questions** (e.g., "How would you approach [specific task from JD] using [specific tool from JD]?")
+3. **Situational Questions** (e.g., "If [realistic scenario based on JD responsibilities], what would you do?")
 
-Return the response as a simple JSON array of strings:
-["Question 1", "Question 2", ..., "Question 10"]
+Return the response as a JSON object:
+{
+  "questions": ["Question 1", "Question 2", ..., "Question 10"]
+}
 
 IMPORTANT:
-- Automatically detect the language of the JD and generate questions in the SAME language.
-- Questions must be insightful and challenging, not generic.`;
+- Questions must directly reference specific keywords, tools, or responsibilities from the JD.
+- Questions must be insightful and challenging, not generic.
+- Each question should test a DIFFERENT aspect of the candidate's fitness for this specific role.`;
 
   const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
@@ -339,7 +391,7 @@ IMPORTANT:
       "Content-Type": "application/json"
     },
     body: JSON.stringify({
-      "model": "google/gemini-2.5-flash",
+      "model": model,
       "response_format": { "type": "json_object" },
       "messages": [
         { "role": "user", "content": prompt }
@@ -361,38 +413,72 @@ IMPORTANT:
   return [];
 }
 
-async function analyzeAtsSwot(apiKey: string, jdText: string, cvText: string) {
+// ============================================================
+// AI Function: ATS SWOT Analysis
+// Core: Actionable metrics, specific "how to reach 95%" guide
+// ============================================================
+async function analyzeAtsSwot(apiKey: string, jdText: string, cvText: string, language: string, model: string) {
+  const lang = langInstruction(language);
+
   const prompt = `
-Role: Expert ATS System & HR Strategy Analyst.
+${lang}
 
-Task: Analyze the provided CV against the Job Description (JD) to provide an ATS Score and a Strategic SWOT Analysis.
+## Your Role
+You are an expert ATS (Applicant Tracking System) engineer combined with a senior HR strategist. You understand exactly how ATS algorithms score CVs and what hiring managers look for.
 
-Job Description:
+## Your Mission
+Analyze the CV against the JD. Provide a precise ATS score and an actionable improvement roadmap that tells the user EXACTLY how to reach 95%+.
+
+## STRICT RULES
+
+### Rule 1: BE SPECIFIC, NOT VAGUE
+Do NOT say "Lacks project experience." Instead, say "Your CV does not mention experience with 'cross-functional stakeholder management' which the JD specifically requires in bullet 3 under Core Responsibilities."
+
+### Rule 2: REFERENCE THE OPTIMIZED CV
+When giving improvement advice, tell the user: "In the optimized version of your CV, I have already woven [keyword] into your [specific experience section]. This change alone should improve your score by approximately X points." Reference what has ALREADY been changed.
+
+### Rule 3: METRICS GAP WARNING
+If the user's CV bullet points lack quantifiable results, list each one and urge them to add real data. Say: "Your bullet 'Managed social media accounts' has no metrics. Adding a result like 'growing followers by X%' would significantly boost your ATS score."
+
+### Rule 4: ACTIONABLE SCORE IMPROVEMENT PLAN
+After giving the current score, provide a concrete breakdown:
+"Your current score is 72. To reach 95:
+ - (+8 pts) Add the missing keyword 'data-driven' to your marketing experience section
+ - (+5 pts) Add quantifiable metrics to at least 3 bullet points
+ - (+10 pts) These keywords cannot be added because you lack the experience — consider upskilling or addressing in your cover letter: [list]"
+
+## Input
+
+**Job Description:**
 ${jdText}
 
-CV Text:
+**CV Text:**
 ${cvText}
 
-Output Requirements:
-1. **ATS Score (0-100)**: Evaluate how well the CV matches the JD based on keywords, skills, and experience match. Be strict but fair.
-2. **Missing Keywords**: Identify critical high-value keywords from the JD that are MISSING in the CV.
-3. **SWOT Analysis**:
-    - **Strengths**: What makes this candidate a strong fit based on the CV?
-    - **Weaknesses**: What are the gaps or red flags in the CV vs JD?
-    - **Opportunities**: What could the candidate emphasize more to improve their chances?
-    - **Threats**: What external factors or competition might be a challenge (e.g., "Lack of specific degree required by JD")?
-
-Return pure JSON:
+## Required JSON Output Format
 {
-    "atsScore": 75,
-    "missingKeywords": ["Keyword1", "Keyword2"],
-    "swot": {
-        "strengths": ["Item 1", "Item 2"],
-        "weaknesses": ["Item 1", "Item 2"],
-        "opportunities": ["Item 1", "Item 2"],
-        "threats": ["Item 1", "Item 2"]
+  "atsScore": 75,
+  "missingKeywords": ["Keyword1", "Keyword2"],
+  "swot": {
+    "strengths": ["Specific strength referencing CV content"],
+    "weaknesses": ["Specific weakness referencing JD requirement"],
+    "opportunities": ["Specific actionable opportunity"],
+    "threats": ["Specific external threat or competition factor"]
+  },
+  "scoreImprovementPlan": [
+    {
+      "action": "What to do (e.g., 'Add keyword X to your Y experience section')",
+      "estimatedPointsGain": 8,
+      "alreadyDone": true or false,
+      "details": "If alreadyDone is true, explain where in the optimized CV this was already applied. If false, explain what the user needs to do manually."
     }
+  ]
 }
+
+IMPORTANT:
+- Be strict but fair with the ATS score.
+- Every SWOT item must reference specific content from the CV or JD, not generic advice.
+- The scoreImprovementPlan must add up to show a clear path from the current score to 95+.
 `;
 
   const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
@@ -402,7 +488,88 @@ Return pure JSON:
       "Content-Type": "application/json"
     },
     body: JSON.stringify({
-      "model": "google/gemini-2.5-flash",
+      "model": model,
+      "response_format": { "type": "json_object" },
+      "messages": [
+        { "role": "user", "content": prompt }
+      ]
+    })
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`OpenRouter API error: ${response.status} - ${errText}`);
+  }
+
+  const data = await response.json();
+  const text = data.choices[0].message.content;
+  return safeJsonParse(text);
+}
+
+// ============================================================
+// AI Function: Generate Cover Letter (NEW)
+// ============================================================
+async function generateCoverLetter(apiKey: string, jdText: string, cvText: string, language: string, model: string) {
+  const lang = langInstruction(language);
+
+  const prompt = `
+${lang}
+
+## Your Role
+You are an elite career coach who has helped 1000+ job seekers land offers at top companies. You write compelling, personalized cover letters that hiring managers actually want to read.
+
+## Your Mission
+Write a highly customized cover letter based on the user's CV and the target Job Description. The cover letter must feel personal, confident, and directly connect the user's real experience to the job requirements.
+
+## STRICT RULES
+
+### Rule 1: ONLY USE REAL EXPERIENCE
+Every claim in the cover letter MUST be backed by something that exists in the user's CV. Do NOT invent achievements, projects, skills, or numbers that are not in the CV.
+
+### Rule 2: CONNECT CV TO JD
+For each key requirement in the JD, find the most relevant experience from the CV and weave it into a compelling narrative. If there is no matching experience for a JD requirement, DO NOT mention it — simply focus on the areas where the user IS strong.
+
+### Rule 3: PROFESSIONAL TONE
+The cover letter should be confident but not arrogant, specific but not verbose. Aim for 3-4 paragraphs, approximately 250-350 words.
+
+### Rule 4: STRUCTURE
+- **Opening paragraph**: Hook the reader. Mention the specific role and briefly state why the user is an excellent fit.
+- **Body paragraphs (1-2)**: Connect 2-3 of the strongest CV experiences to the top JD requirements, using specific (real) examples.
+- **Closing paragraph**: Express enthusiasm, suggest next steps (interview), and thank the reader.
+
+## Input
+
+**Job Description:**
+${jdText}
+
+**User's CV:**
+${cvText}
+
+## Required JSON Output Format
+{
+  "coverLetter": "The full cover letter text. Use proper paragraph breaks with \\n\\n between paragraphs.",
+  "highlightedConnections": [
+    {
+      "jdRequirement": "The JD requirement this addresses",
+      "cvExperience": "Which CV experience was used to address it"
+    }
+  ]
+}
+
+IMPORTANT:
+- The cover letter must feel genuinely personalized, not templated.
+- Do NOT use cliché phrases like "I am writing to express my interest" or "I am a highly motivated individual".
+- Start with something specific and engaging about the role or company.
+`;
+
+  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${apiKey}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      "model": model,
       "response_format": { "type": "json_object" },
       "messages": [
         { "role": "user", "content": prompt }
