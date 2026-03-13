@@ -276,6 +276,15 @@ After optimization, list all JD keywords you could NOT incorporate because the u
 ### Rule 6: METRICS ADVICE
 Identify bullet points where the user describes responsibilities but provides no quantifiable results. For each one, suggest what kind of metric they should add (e.g., "How much traffic did you increase? By what percentage did you improve efficiency?"). DO NOT add the numbers yourself.
 
+### Rule 7: BULLET POINT FORMATTING FOR WORK EXPERIENCE
+For Professional Experience / Work Experience sections, you MUST format the optimized content as follows:
+- The **job title, company name, location, and dates** line stays as a single plain text line (NO bullet point).
+- Every individual achievement, responsibility, or description underneath MUST be its own separate bullet point using "- " prefix.
+- Do NOT merge multiple achievements into one long paragraph. Each distinct point gets its own "- " bullet.
+- Example format:
+  "Marketing Manager | Acme Corp | London, UK\n- Developed and executed **content strategy** across social media channels\n- Led **conversion optimization** for 2,140+ product listings\n- Collaborated with 15 internal **cross-functional** teams"
+- For Summary/Skills/Education sections, use whatever format is most natural (paragraph or bullets).
+
 ## Input
 
 **Job Description:**
@@ -292,7 +301,7 @@ ${cvText}
     {
       "title": "Section Title (e.g., Professional Summary, Work Experience, Skills)",
       "originalContent": "The exact original text from the CV for this section",
-      "optimizedContent": "The rewritten version with **bolded keywords** woven in naturally. Use Markdown bullet points (- item) for lists.",
+      "optimizedContent": "The rewritten version with **bolded keywords** woven in naturally. Use Markdown bullet points (- item) for each achievement in work experience sections.",
       "changelog": "Brief explanation of what was changed in this section and which JD keywords were integrated"
     }
   ],
@@ -315,7 +324,8 @@ ${cvText}
 IMPORTANT:
 - In the "keywords" array, return ONLY the keyword itself (e.g., "Google Ads", "SEO"). Do NOT include category prefixes.
 - Fix any spacing errors from PDF extraction (e.g., "M anaged" → "Managed").
-- Use Markdown bullet points (- item) for lists in optimizedContent.
+- In work experience sections, EVERY achievement must be a separate bullet point using "- " prefix. Do NOT write paragraphs.
+- The job title / company / date line should NOT have a bullet point prefix.
 - Ensure the optimized CV reads naturally and professionally.`;
 
   const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
