@@ -209,7 +209,12 @@ export async function POST(req: NextRequest) {
         if (!cvText) {
           return NextResponse.json({ error: 'Missing cvText for cover letter' }, { status: 400, headers: corsHeaders });
         }
-        result = await generateCoverLetter(apiKey, jdText, cvText, outputLanguage, model);
+        // ONLY ALLOW PRO/PREMIUM TO GENERATE COVER LETTER TO SAVE TOKENS
+        if (userTier === 'free') {
+          result = { content: "LOCKED_PREMIUM_FEATURE" };
+        } else {
+          result = await generateCoverLetter(apiKey, jdText, cvText, outputLanguage, model);
+        }
         break;
 
       default:
